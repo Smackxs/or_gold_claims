@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-One step: download all ACTIVE placer + lode claims in Oregon from BLM MLRS and
-write claims_slim.db with just: name, case_nr (BLM record number), lat, lon.
+One step: download all ACTIVE and PENDING placer + lode claims in Oregon from BLM MLRS
+and write claims_slim.db with: name, case_nr (BLM record number), claim_type
+(Placer/Lode), status (BLM disposition, e.g. Active/Pending), lat, lon.
 
-Usage: python build_claims_db.py        (Python 3.8+, no extra packages)
+Usage: python -u build_claims_db.py     (Python 3.8+, no extra packages)
 """
 import json, sqlite3, time, urllib.parse, urllib.request, os
 
 LAYER = "https://nlsdbpubgis.blm.gov/arcgis/rest/services/Mining_Claims/MiningClaims/MapServer/1/query"
 TYPES = "CSE_TYPE_NR IN ('384101','384103','384201','384203')"   # lode + placer
+LABELS = {"384101": "Lode", "384103": "Lode", "384201": "Placer", "384203": "Placer"}
 OR_ENV = "-124.75,41.95,-116.40,46.35"                           # Oregon bbox (WGS84)
 PAGE = 500
 OUT = "claims_slim.db"
+
+
+def log(*a):
+    print(*a, flush=True)
 
 
 def call(params, tries=5):
@@ -24,7 +30,7 @@ def call(params, tries=5):
                 raise RuntimeError(out["error"])
             return out
         except Exception as e:
-            print(f"  retry {i+1} ({e})"); time.sleep(2 ** i)
+            log(f"  retry {i+1} ({e})"); time.sleep(2 ** i)
     raise SystemExit("Server kept failing - check your internet connection and try again.")
 
 
@@ -49,19 +55,28 @@ def main():
         os.remove(OUT)
     db = sqlite3.connect(OUT)
     db.executescript("""
-        CREATE TABLE claims (_id INTEGER PRIMARY KEY, name TEXT, case_nr TEXT, lat REAL, lon REAL);
+        CREATE TABLE claims (
+            _id        INTEGER PRIMARY KEY,
+            name       TEXT,
+            case_nr    TEXT,
+            claim_type TEXT,     -- Placer / Lode
+            status     TEXT,     -- BLM disposition: Active / Pending (as BLM reports it)
+            lat        REAL,
+            lon        REAL
+        );
         CREATE TABLE android_metadata (locale TEXT);
         INSERT INTO android_metadata VALUES ('en_US');
     """)
-    where = f"{TYPES}"
+    where = TYPES
     total = call(spatial({"where": where, "returnCountOnly": "true", "f": "json"}))["count"]
-    print(f"{total} claims found inside Oregon's bounding box")
+    log(f"{total} claims found inside Oregon's bounding box")
     if total == 0:
         raise SystemExit("Server reported 0 claims - paste this output to Claude.")
 
     offset = 0
     while offset < total:
-        data = call(spatial({"where": where, "outFields": "OBJECTID,CSE_NR,CSE_NAME,ADMIN_STATE,GEO_STATE",
+        data = call(spatial({"where": where,
+                             "outFields": "OBJECTID,CSE_NR,CSE_NAME,CSE_TYPE_NR,BLM_PROD,CSE_DISP",
                              "outSR": 4326, "returnGeometry": "true", "orderByFields": "OBJECTID",
                              "resultOffset": offset, "resultRecordCount": PAGE, "f": "geojson"}))
         feats = data.get("features", [])
@@ -73,17 +88,21 @@ def main():
             if not g or not g.get("coordinates"):
                 continue
             lat, lon = center(g)
-            rows.append((p.get("OBJECTID", f.get("id")), p.get("CSE_NAME"), p.get("CSE_NR"), lat, lon))
-        db.executemany("INSERT OR REPLACE INTO claims VALUES (?,?,?,?,?)", rows)
+            ctype = LABELS.get(p.get("CSE_TYPE_NR"), p.get("BLM_PROD"))
+            rows.append((p.get("OBJECTID", f.get("id")), p.get("CSE_NAME"), p.get("CSE_NR"),
+                         ctype, p.get("CSE_DISP"), lat, lon))
+        db.executemany("INSERT OR REPLACE INTO claims VALUES (?,?,?,?,?,?,?)", rows)
         db.commit()
         offset += len(feats)
-        print(f"  {offset}/{total}")
+        log(f"  {offset}/{total}")
 
     db.execute("CREATE INDEX idx_claims_lat_lon ON claims(lat, lon)")
     n = db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+    log("Status counts:", db.execute("SELECT status, COUNT(*) FROM claims GROUP BY status").fetchall())
+    log("Type counts:  ", db.execute("SELECT claim_type, COUNT(*) FROM claims GROUP BY claim_type").fetchall())
     db.commit(); db.execute("VACUUM"); db.close()
-    print(f"\nDone: {n} claims saved to {OUT}")
-    print("Note: the bounding box also catches claims just across the OR border.")
+    log(f"\nDone: {n} claims saved to {OUT}")
+    log("Note: the bounding box also catches claims just across the OR border.")
 
 
 if __name__ == "__main__":
