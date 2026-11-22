@@ -1,29 +1,54 @@
-# Save as .github/workflows/monthly.yml in a PUBLIC repo that also contains build_claims_db.py
+# Replace the contents of .github/workflows/monthly.yml with this file.
 name: Monthly claims DB
 
 on:
   schedule:
-    - cron: "0 6 1 * *"      # 06:00 UTC on the 1st of every month
-  workflow_dispatch:          # lets you run it manually from the Actions tab
+    - cron: "0 6 1-3 * *"     # 1st, 2nd, 3rd of each month (2nd/3rd only run if 1st failed)
+  workflow_dispatch:          # manual run; always rebuilds
 
 permissions:
-  contents: write             # needed to publish the release
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if already built this month
+        id: check
+        run: |
+          THIS=$(date -u +%Y-%m)
+          CUR=$(gh release download latest-data -p manifest.json -O - 2>/dev/null \
+                | python3 -c "import sys,json;print(json.load(sys.stdin)['version'][:7])" 2>/dev/null || echo none)
+          echo "This month: $THIS   Published: $CUR"
+          if [ "$CUR" = "$THIS" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
-      - name: Build database
-        run: python build_claims_db.py
+      - name: Build database (up to 3 attempts)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          for i in 1 2 3; do
+            if python build_claims_db.py; then exit 0; fi
+            echo "Attempt $i failed."
+            if [ "$i" -lt 3 ]; then echo "Waiting 10 minutes..."; sleep 600; fi
+          done
+          echo "All attempts failed."
+          exit 1
 
       - name: Sanity check, package, write manifest
+        if: steps.check.outputs.skip != 'true'
         run: |
           python - <<'EOF'
           import sqlite3, gzip, shutil, hashlib, json, datetime, sys
@@ -41,8 +66,7 @@ jobs:
           EOF
 
       - name: Publish to release "latest-data"
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.check.outputs.skip != 'true'
         run: |
           gh release view latest-data >/dev/null 2>&1 || \
             gh release create latest-data --title "Latest data" --notes "Auto-updated monthly"
