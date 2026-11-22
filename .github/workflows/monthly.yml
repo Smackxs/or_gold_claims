@@ -1,0 +1,49 @@
+# Save as .github/workflows/monthly.yml in a PUBLIC repo that also contains build_claims_db.py
+name: Monthly claims DB
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"      # 06:00 UTC on the 1st of every month
+  workflow_dispatch:          # lets you run it manually from the Actions tab
+
+permissions:
+  contents: write             # needed to publish the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build database
+        run: python build_claims_db.py
+
+      - name: Sanity check, package, write manifest
+        run: |
+          python - <<'EOF'
+          import sqlite3, gzip, shutil, hashlib, json, datetime, sys
+          MIN_ROWS = 500   # adjust after your first successful run (set to ~80% of normal)
+          n = sqlite3.connect("claims_slim.db").execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+          if n < MIN_ROWS:
+              sys.exit(f"Only {n} rows - refusing to publish a bad database")
+          with open("claims_slim.db", "rb") as f, gzip.open("claims_slim.db.gz", "wb", 9) as g:
+              shutil.copyfileobj(f, g)
+          sha = hashlib.sha256(open("claims_slim.db", "rb").read()).hexdigest()
+          today = datetime.date.today().isoformat()
+          json.dump({"version": today, "rows": n, "sha256": sha,
+                     "url": "claims_slim.db.gz"}, open("manifest.json", "w"))
+          print("Packaged", n, "rows, version", today)
+          EOF
+
+      - name: Publish to release "latest-data"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest-data >/dev/null 2>&1 || \
+            gh release create latest-data --title "Latest data" --notes "Auto-updated monthly"
+          gh release upload latest-data claims_slim.db.gz manifest.json --clobber
