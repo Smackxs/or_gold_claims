@@ -40,7 +40,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           for i in 1 2 3; do
-            if python build_claims_db.py; then exit 0; fi
+            if python -u build_claims_db.py; then exit 0; fi
             echo "Attempt $i failed."
             if [ "$i" -lt 3 ]; then echo "Waiting 10 minutes..."; sleep 600; fi
           done
@@ -52,7 +52,7 @@ jobs:
         run: |
           python - <<'EOF'
           import sqlite3, gzip, shutil, hashlib, json, datetime, sys
-          MIN_ROWS = 500   # adjust after your first successful run (set to ~80% of normal)
+          MIN_ROWS = 15000   # about 70% of the ~22,000 claims; adjust if real counts differ
           n = sqlite3.connect("claims_slim.db").execute("SELECT COUNT(*) FROM claims").fetchone()[0]
           if n < MIN_ROWS:
               sys.exit(f"Only {n} rows - refusing to publish a bad database")
