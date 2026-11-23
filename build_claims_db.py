@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download all ACTIVE and PENDING placer + lode claims in Oregon from BLM MLRS and write
+Download all active-layer placer + lode claims in and around Oregon from BLM MLRS and write
 claims_slim.db: name, case_nr (BLM record number), claim_type, status, lat, lon.
 
 Resumable: progress is saved after every page, so if the BLM server errors out
@@ -65,7 +65,7 @@ def open_db(fresh):
         CREATE TABLE IF NOT EXISTS claims (
             _id INTEGER PRIMARY KEY, name TEXT, case_nr TEXT,
             claim_type TEXT,   -- Placer / Lode
-            status TEXT,       -- BLM disposition: Active / Pending (as BLM reports it)
+            status TEXT,       -- BLM disposition as reported: Active, Filed, Under Review, On Appeal, Interim
             lat REAL, lon REAL);
         CREATE TABLE IF NOT EXISTS android_metadata (locale TEXT);
         CREATE TABLE IF NOT EXISTS progress (k TEXT PRIMARY KEY, v INTEGER);
