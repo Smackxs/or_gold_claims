@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download all active-layer placer + lode claims in and around Oregon from BLM MLRS and write
+Download all placer + lode claims whose BLM case number starts with 'OR' from MLRS and write
 claims_slim.db: name, case_nr (BLM record number), claim_type, status, lat, lon.
 
 Resumable: progress is saved after every page, so if the BLM server errors out
@@ -13,6 +13,7 @@ import json, sqlite3, sys, time, urllib.parse, urllib.request, os
 
 LAYER = "https://nlsdbpubgis.blm.gov/arcgis/rest/services/Mining_Claims/MiningClaims/MapServer/1/query"
 TYPES = "CSE_TYPE_NR IN ('384101','384103','384201','384203')"   # lode + placer
+WHERE_BASE = f"({TYPES}) AND CSE_NR LIKE 'OR%'"                         # Oregon case numbers only
 LABELS = {"384101": "Lode", "384103": "Lode", "384201": "Placer", "384203": "Placer"}
 OR_ENV = "-124.75,41.95,-116.40,46.35"                           # Oregon bbox (WGS84)
 PAGE_MAX, PAGE_MIN = 500, 50
@@ -87,8 +88,8 @@ def main():
     if last_oid:
         log(f"Resuming after OBJECTID {last_oid} ({db.execute('SELECT COUNT(*) FROM claims').fetchone()[0]} claims already saved)")
 
-    total = call(spatial({"where": TYPES, "returnCountOnly": "true", "f": "json"}), tries=5)["count"]
-    log(f"{total} claims found inside Oregon's bounding box")
+    total = call(spatial({"where": WHERE_BASE, "returnCountOnly": "true", "f": "json"}), tries=5)["count"]
+    log(f"{total} claims with an OR case number found")
     if total == 0:
         raise SystemExit("Server reported 0 claims - paste this output to Claude.")
 
@@ -96,7 +97,7 @@ def main():
     while True:
         try:
             data = call(spatial({
-                "where": f"({TYPES}) AND OBJECTID > {last_oid}",
+                "where": f"{WHERE_BASE} AND OBJECTID > {last_oid}",
                 "outFields": "OBJECTID,CSE_NR,CSE_NAME,CSE_TYPE_NR,BLM_PROD,CSE_DISP",
                 "outSR": 4326, "returnGeometry": "true", "orderByFields": "OBJECTID",
                 "resultRecordCount": page, "f": "geojson"}))
@@ -121,6 +122,8 @@ def main():
             max_oid = max(max_oid, oid)
             if not g or not g.get("coordinates"):
                 continue
+            if not (p.get("CSE_NR") or "").startswith("OR"):   # safety net: Oregon case numbers only
+                continue
             lat, lon = center(g)
             rows.append((oid, p.get("CSE_NAME"), p.get("CSE_NR"),
                          LABELS.get(p.get("CSE_TYPE_NR"), p.get("BLM_PROD")), p.get("CSE_DISP"), lat, lon))
@@ -141,7 +144,6 @@ def main():
     db.commit()
     db.execute("DROP TABLE progress"); db.commit(); db.execute("VACUUM"); db.close()
     log(f"\nDone: {n} claims saved to {OUT}")
-    log("Note: the bounding box also catches claims just across the OR border.")
 
 
 if __name__ == "__main__":
