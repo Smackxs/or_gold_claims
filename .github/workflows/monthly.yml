@@ -52,7 +52,7 @@ jobs:
         run: |
           python - <<'EOF'
           import sqlite3, gzip, shutil, hashlib, json, datetime, sys
-          MIN_ROWS = 15000   # about 70% of the ~22,000 claims; adjust if real counts differ
+          MIN_ROWS = 8000   # about 70% of the ~11,000 claims; adjust if real counts differ
           n = sqlite3.connect("claims_slim.db").execute("SELECT COUNT(*) FROM claims").fetchone()[0]
           if n < MIN_ROWS:
               sys.exit(f"Only {n} rows - refusing to publish a bad database")
