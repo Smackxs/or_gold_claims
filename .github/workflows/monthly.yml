@@ -1,5 +1,5 @@
 # Replace the contents of .github/workflows/monthly.yml with this file.
-# Four parallel jobs (OR, CA, ID, NV) each build one small database; a final job merges them
+# Four parallel jobs (OR, CA, ID, NV) each build one small database of Active claims; a final job merges them
 # into claims_slim.db and publishes it. If any job fails, nothing is published and users keep
 # the last good database.
 name: Monthly claims DB
@@ -60,7 +60,7 @@ jobs:
           echo "All attempts failed."
           exit 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: claims-${{ matrix.prefix }}
           path: claims_${{ matrix.prefix }}.db
@@ -80,7 +80,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: claims-*
           merge-multiple: true      # puts claims_OR.db, claims_CA.db, ... in the working folder
@@ -92,7 +92,7 @@ jobs:
         run: |
           python - <<'EOF'
           import sqlite3, gzip, shutil, hashlib, json, datetime, sys
-          MIN_ROWS = 285000   # final guard; merge_claims_db.py already checks each state
+          MIN_ROWS = 200000   # final guard; merge_claims_db.py already checks each state
           n = sqlite3.connect("claims_slim.db").execute("SELECT COUNT(*) FROM claims").fetchone()[0]
           if n < MIN_ROWS:
               sys.exit(f"Only {n} rows - refusing to publish a bad database")
