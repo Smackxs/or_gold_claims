@@ -3,6 +3,8 @@
 Download all placer + lode claims whose BLM case number starts with PREFIX from MLRS
 and write claims_<PREFIX>.db: name, case_nr (BLM record number), claim_type, status, lat, lon.
 
+Only claims whose status (CSE_DISP) is 'Active' are kept, to keep the database small.
+
 PREFIX is one of OR, CA, ID, NV. Washington claims carry OR case numbers, so
 --prefix OR covers Oregon and Washington. No bounding box is used: the case-number
 prefix is the only state filter (a box would drop claims that are mapped outside it).
@@ -19,6 +21,7 @@ LAYER = os.environ.get(
     "CLAIMS_LAYER",
     "https://nlsdbpubgis.blm.gov/arcgis/rest/services/Mining_Claims/MiningClaims/MapServer/1/query")
 TYPES = "CSE_TYPE_NR IN ('384101','384103','384201','384203')"   # lode + placer (text field, so quoted)
+STATUS = "Active"                      # only this BLM disposition is downloaded
 LABELS = {"384101": "Lode", "384103": "Lode", "384201": "Placer", "384203": "Placer"}
 PAGE_MAX, PAGE_MIN = 500, 50
 MAX_FAILS = 8
@@ -91,7 +94,7 @@ def main():
     args = ap.parse_args()
     PREFIX = args.prefix.upper()
     OUT = f"claims_{PREFIX}.db"
-    where_base = f"({TYPES}) AND CSE_NR LIKE '{PREFIX}%'"
+    where_base = f"({TYPES}) AND CSE_DISP = '{STATUS}' AND CSE_NR LIKE '{PREFIX}%'"
 
     db = open_db(args.fresh)
     row = db.execute("SELECT v FROM progress WHERE k='last_oid'").fetchone()
@@ -153,6 +156,9 @@ def main():
     log("Status counts:", db.execute("SELECT status, COUNT(*) FROM claims GROUP BY status").fetchall())
     log("Type counts:  ", db.execute("SELECT claim_type, COUNT(*) FROM claims GROUP BY claim_type").fetchall())
     db.commit()
+    # remember what the server reported, so merge_claims_db.py can detect a partial pull
+    db.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER)")
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('expected', ?)", (total,))
     db.execute("DROP TABLE progress"); db.commit(); db.execute("VACUUM"); db.close()
     log(f"\nDone: {n} of {total} {PREFIX} claims saved to {OUT}")
 
