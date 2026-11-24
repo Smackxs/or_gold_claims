@@ -1,4 +1,7 @@
 # Replace the contents of .github/workflows/monthly.yml with this file.
+# Four parallel jobs (OR, CA, ID, NV) each build one small database; a final job merges them
+# into claims_slim.db and publishes it. If any job fails, nothing is published and users keep
+# the last good database.
 name: Monthly claims DB
 
 on:
@@ -10,14 +13,14 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v6
-
       - name: Skip if already built this month
         id: check
         run: |
@@ -31,28 +34,65 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330          # Nevada is ~277,000 claims; the others finish much sooner
+    strategy:
+      fail-fast: true
+      matrix:
+        prefix: [OR, CA, ID, NV]  # OR also covers Washington (its claims carry OR case numbers)
+    steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/setup-python@v6
-        if: steps.check.outputs.skip != 'true'
         with:
           python-version: "3.12"
 
-      - name: Build database (up to 3 attempts)
-        if: steps.check.outputs.skip != 'true'
+      - name: Build ${{ matrix.prefix }} database (up to 3 attempts, resumes between attempts)
         run: |
           for i in 1 2 3; do
-            if python -u build_claims_db.py; then exit 0; fi
+            if python -u build_claims_db.py --prefix ${{ matrix.prefix }}; then exit 0; fi
             echo "Attempt $i failed."
             if [ "$i" -lt 3 ]; then echo "Waiting 10 minutes..."; sleep 600; fi
           done
           echo "All attempts failed."
           exit 1
 
-      - name: Sanity check, package, write manifest
-        if: steps.check.outputs.skip != 'true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claims-${{ matrix.prefix }}
+          path: claims_${{ matrix.prefix }}.db
+          retention-days: 1
+
+  publish:
+    needs: [check, build]
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: claims-*
+          merge-multiple: true      # puts claims_OR.db, claims_CA.db, ... in the working folder
+
+      - name: Merge (checks every state has enough rows)
+        run: python -u merge_claims_db.py
+
+      - name: Package and write manifest
         run: |
           python - <<'EOF'
           import sqlite3, gzip, shutil, hashlib, json, datetime, sys
-          MIN_ROWS = 8000   # about 70% of the ~11,000 claims; adjust if real counts differ
+          MIN_ROWS = 285000   # final guard; merge_claims_db.py already checks each state
           n = sqlite3.connect("claims_slim.db").execute("SELECT COUNT(*) FROM claims").fetchone()[0]
           if n < MIN_ROWS:
               sys.exit(f"Only {n} rows - refusing to publish a bad database")
@@ -64,9 +104,9 @@ jobs:
                      "url": "claims_slim.db.gz"}, open("manifest.json", "w"))
           print("Packaged", n, "rows, version", today)
           EOF
+          ls -l claims_slim.db claims_slim.db.gz
 
       - name: Publish to release "latest-data"
-        if: steps.check.outputs.skip != 'true'
         run: |
           gh release view latest-data >/dev/null 2>&1 || \
             gh release create latest-data --title "Latest data" --notes "Auto-updated monthly"
