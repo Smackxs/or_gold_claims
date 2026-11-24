@@ -7,14 +7,16 @@ claims(_id, name, case_nr, claim_type, status, lat, lon), index on (lat, lon), a
 The four inputs hold disjoint case numbers (each starts with a different prefix), and _id is
 BLM's OBJECTID (unique across the layer), so nothing needs de-duplicating.
 
-Refuses to produce a file if any prefix is suspiciously small, so a partial pull can never
-be published. Minimums are about 80% of the counts BLM reported on 2026-11-23.
+Only Active claims are in the inputs. Refuses to produce a file if any prefix has fewer than
+90% of the rows the server reported when it was pulled (stored in each input's meta table),
+or is below a small floor, so a partial pull can never be published.
 """
 import os, sqlite3, sys
 
 PREFIXES = ["OR", "CA", "ID", "NV"]
-MIN_ROWS = {"OR": 11000, "CA": 21000, "ID": 32000, "NV": 220000}
-MIN_TOTAL = 285000
+FLOOR = {"OR": 5000, "CA": 1000, "ID": 1000, "NV": 100000}   # absolute minimums per prefix
+MIN_RATIO = 0.90      # rows saved vs rows the server reported
+MIN_TOTAL = 200000    # about 80% of the 253,782 Active claims expected on 2026-11-23
 OUT = "claims_slim.db"
 
 
@@ -41,10 +43,15 @@ def main():
                       SELECT _id, name, case_nr, claim_type, status, lat, lon
                       FROM src.claims WHERE lat IS NOT NULL AND lon IS NOT NULL""")
         n = db.execute("SELECT COUNT(*) FROM src.claims").fetchone()[0]
+        try:
+            expected = db.execute("SELECT v FROM src.meta WHERE k='expected'").fetchone()[0]
+        except Exception:
+            sys.exit(f"claims_{p}.db has no 'expected' count - refusing to publish")
         db.commit()
         db.execute("DETACH DATABASE src")
-        print(f"{p}: {n} rows (minimum {MIN_ROWS[p]})")
-        if n < MIN_ROWS[p]:
+        need = max(FLOOR[p], int(expected * MIN_RATIO))
+        print(f"{p}: {n} rows (server reported {expected}; minimum {need})")
+        if n < need:
             sys.exit(f"{p} has only {n} rows - refusing to publish a bad database")
         total += n
     n = db.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
