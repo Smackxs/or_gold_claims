@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-Download all placer + lode claims whose BLM case number starts with 'OR' from MLRS and write
-claims_slim.db: name, case_nr (BLM record number), claim_type, status, lat, lon.
+Download all placer + lode claims whose BLM case number starts with PREFIX from MLRS
+and write claims_<PREFIX>.db: name, case_nr (BLM record number), claim_type, status, lat, lon.
+
+PREFIX is one of OR, CA, ID, NV. Washington claims carry OR case numbers, so
+--prefix OR covers Oregon and Washington. No bounding box is used: the case-number
+prefix is the only state filter (a box would drop claims that are mapped outside it).
 
 Resumable: progress is saved after every page, so if the BLM server errors out
 and the script is run again (or retried by the workflow), it continues where it stopped.
 
-Usage: python -u build_claims_db.py          (resumes an unfinished download)
-       python -u build_claims_db.py --fresh  (start over)
+Usage: python -u build_claims_db.py --prefix NV           (resumes an unfinished download)
+       python -u build_claims_db.py --prefix NV --fresh   (start over)
 """
-import json, sqlite3, sys, time, urllib.parse, urllib.request, os
+import argparse, json, os, sqlite3, sys, time, urllib.parse, urllib.request
 
-LAYER = "https://nlsdbpubgis.blm.gov/arcgis/rest/services/Mining_Claims/MiningClaims/MapServer/1/query"
-TYPES = "CSE_TYPE_NR IN ('384101','384103','384201','384203')"   # lode + placer
-WHERE_BASE = f"({TYPES}) AND CSE_NR LIKE 'OR%'"                         # Oregon case numbers only
+LAYER = os.environ.get(
+    "CLAIMS_LAYER",
+    "https://nlsdbpubgis.blm.gov/arcgis/rest/services/Mining_Claims/MiningClaims/MapServer/1/query")
+TYPES = "CSE_TYPE_NR IN ('384101','384103','384201','384203')"   # lode + placer (text field, so quoted)
 LABELS = {"384101": "Lode", "384103": "Lode", "384201": "Placer", "384203": "Placer"}
-OR_ENV = "-124.75,41.95,-116.40,46.35"                           # Oregon bbox (WGS84)
 PAGE_MAX, PAGE_MIN = 500, 50
 MAX_FAILS = 8
-OUT = "claims_slim.db"
+# We only need each claim's center, so let the server simplify outlines (~50 m) and round coordinates.
+SIMPLIFY = {"maxAllowableOffset": 0.0005, "geometryPrecision": 5}
+
+PREFIX = None
+OUT = None
 
 
 def log(*a):
@@ -42,12 +50,6 @@ def call(params, tries=3):
     raise RuntimeError(last)
 
 
-def spatial(p):
-    p.update(geometry=OR_ENV, geometryType="esriGeometryEnvelope", inSR=4326,
-             spatialRel="esriSpatialRelIntersects")
-    return p
-
-
 def center(g):
     xs, ys = [], []
     def walk(c):
@@ -66,7 +68,7 @@ def open_db(fresh):
         CREATE TABLE IF NOT EXISTS claims (
             _id INTEGER PRIMARY KEY, name TEXT, case_nr TEXT,
             claim_type TEXT,   -- Placer / Lode
-            status TEXT,       -- BLM disposition as reported: Active, Filed, Under Review, On Appeal, Interim
+            status TEXT,       -- BLM disposition as reported: Active, Filed, Submitted, Under Review, On Appeal, ...
             lat REAL, lon REAL);
         CREATE TABLE IF NOT EXISTS android_metadata (locale TEXT);
         CREATE TABLE IF NOT EXISTS progress (k TEXT PRIMARY KEY, v INTEGER);
@@ -82,25 +84,34 @@ def open_db(fresh):
 
 
 def main():
-    db = open_db("--fresh" in sys.argv)
+    global PREFIX, OUT
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prefix", required=True, help="case-number prefix: OR, CA, ID or NV")
+    ap.add_argument("--fresh", action="store_true", help="start over")
+    args = ap.parse_args()
+    PREFIX = args.prefix.upper()
+    OUT = f"claims_{PREFIX}.db"
+    where_base = f"({TYPES}) AND CSE_NR LIKE '{PREFIX}%'"
+
+    db = open_db(args.fresh)
     row = db.execute("SELECT v FROM progress WHERE k='last_oid'").fetchone()
     last_oid = row[0] if row else 0
     if last_oid:
         log(f"Resuming after OBJECTID {last_oid} ({db.execute('SELECT COUNT(*) FROM claims').fetchone()[0]} claims already saved)")
 
-    total = call(spatial({"where": WHERE_BASE, "returnCountOnly": "true", "f": "json"}), tries=5)["count"]
-    log(f"{total} claims with an OR case number found")
+    total = call({"where": where_base, "returnCountOnly": "true", "f": "json"}, tries=5)["count"]
+    log(f"{total} claims with a {PREFIX} case number found")
     if total == 0:
         raise SystemExit("Server reported 0 claims - paste this output to Claude.")
 
-    page, fails, scanned = PAGE_MAX, 0, 0
+    page, fails = PAGE_MAX, 0
     while True:
         try:
-            data = call(spatial({
-                "where": f"{WHERE_BASE} AND OBJECTID > {last_oid}",
+            data = call({
+                "where": f"{where_base} AND OBJECTID > {last_oid}",
                 "outFields": "OBJECTID,CSE_NR,CSE_NAME,CSE_TYPE_NR,BLM_PROD,CSE_DISP",
                 "outSR": 4326, "returnGeometry": "true", "orderByFields": "OBJECTID",
-                "resultRecordCount": page, "f": "geojson"}))
+                "resultRecordCount": page, "f": "geojson", **SIMPLIFY})
         except Exception as e:
             fails += 1
             page = max(PAGE_MIN, page // 2)
@@ -122,7 +133,7 @@ def main():
             max_oid = max(max_oid, oid)
             if not g or not g.get("coordinates"):
                 continue
-            if not (p.get("CSE_NR") or "").startswith("OR"):   # safety net: Oregon case numbers only
+            if not (p.get("CSE_NR") or "").startswith(PREFIX):   # safety net
                 continue
             lat, lon = center(g)
             rows.append((oid, p.get("CSE_NAME"), p.get("CSE_NR"),
@@ -143,7 +154,7 @@ def main():
     log("Type counts:  ", db.execute("SELECT claim_type, COUNT(*) FROM claims GROUP BY claim_type").fetchall())
     db.commit()
     db.execute("DROP TABLE progress"); db.commit(); db.execute("VACUUM"); db.close()
-    log(f"\nDone: {n} claims saved to {OUT}")
+    log(f"\nDone: {n} of {total} {PREFIX} claims saved to {OUT}")
 
 
 if __name__ == "__main__":
